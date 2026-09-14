@@ -1,6 +1,11 @@
 {
   "workdir": "",
   "answerFile": "answer.bsl",
+  "editorProcesses": [
+    "1cv8.exe",
+    "1cv8c.exe",
+    "1cv8s.exe"
+  ],
   "navigatorName": "",
   "navigatorUrl": "",
   "pollMs": 700,
