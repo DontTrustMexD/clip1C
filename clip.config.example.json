@@ -1,7 +1,8 @@
 {
   "workdir": "",
   "answerFile": "answer.bsl",
-  "bslnavUrl": "http://127.0.0.1:8765",
+  "navigatorName": "",
+  "navigatorUrl": "",
   "pollMs": 700,
   "stripIndentOnInsert": true,
   "claudeCommand": "",

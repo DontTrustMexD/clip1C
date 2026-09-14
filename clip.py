@@ -81,7 +81,11 @@ CONFIG_PATH = os.path.join(HERE, "clip.config.json")
 DEFAULTS = {
     "workdir": "",   # пусто — папка со скриптом
     "answerFile": "answer.bsl",
-    "bslnavUrl": "http://127.0.0.1:8765",
+    # необязательный внешний навигатор по конфигурации: любой локальный сервис,
+    # который умеет отвечать про метаданные, граф вызовов и карточки методов.
+    # Скрепка только проверяет, жив ли он, и упоминает его в промпте для агента.
+    "navigatorName": "",           # как показывать в шапке; пусто — не показывать
+    "navigatorUrl": "",            # напр. http://127.0.0.1:8765; пусто — выключено
     "pollMs": 700,
     "stripIndentOnInsert": True,
     "claudeCommand": "",           # напр. "claude" — когда CLI разрешат
@@ -510,9 +514,9 @@ class Reader:
 PROMPT_HEADER = """# Контекст из Конфигуратора 1С
 
 Ты помогаешь писать код прямо в Конфигураторе. Отвечай коротко и по делу.
-Прежде чем предлагать правку, проверь окружение через MCP bslnav:
+Прежде чем предлагать правку, проверь окружение доступными инструментами:
 карточку метода, граф вызовов, кто ещё зовёт этот код. Не выдумывай
-методы БСП — проверяй, что они существуют в этой конфигурации.
+методы БСП и общих модулей — убедись, что они есть в этой конфигурации.
 
 Если предлагаешь код на вставку — положи его отдельным блоком BSL,
 без пояснений внутри блока.
@@ -636,7 +640,7 @@ def save_context(ctx, note="", diagnostics=None, all_diagnostics=None):
             lines.append(f"- `{m['kind']} {m['name']}` — строка {L(m['line'])}")
 
     lines.append(f"\nПолный текст модуля: `{module_path}` "
-                 f"(вызовы за пределы модуля здесь не показаны — смотрите bslnav)")
+                 f"(вызовы за пределы модуля здесь не показаны)")
 
     full = all_diagnostics if all_diagnostics is not None else diagnostics
     if full is not None:
@@ -673,7 +677,7 @@ def _write_default_ls_config(path):
         return None
 
 
-def bslnav_alive(url):
+def navigator_alive(url):
     try:
         host_port = url.split("//", 1)[-1]
         host, _, port = host_port.partition(":")
@@ -754,7 +758,7 @@ class Clip:
         lbl_title.pack(side="left")
         for w in (head, lbl_title, self.dot):
             w.bind("<Double-Button-1>", lambda e: self.toggle_compact())
-        self.nav = tk.Label(head, text="bslnav ?", fg=DIM, bg=BG, font=ui)
+        self.nav = tk.Label(head, text="", fg=DIM, bg=BG, font=ui)
         self.nav.pack(side="right")
 
         body = tk.Frame(root, bg=BG)
@@ -1071,9 +1075,14 @@ class Clip:
 
         self.tick_nav += 1
         if self.tick_nav % 10 == 1:
-            up = bslnav_alive(CFG["bslnavUrl"])
-            self.nav.config(text="bslnav ✓" if up else "bslnav ✗",
-                            fg=OK if up else BAD)
+            name = CFG.get("navigatorName", "")
+            url = CFG.get("navigatorUrl", "")
+            if name and url:
+                up = navigator_alive(url)
+                self.nav.config(text=f"{name} ✓" if up else f"{name} ✗",
+                                fg=OK if up else BAD)
+            else:
+                self.nav.config(text="")
 
         self.root.after(CFG["pollMs"], self.poll)
 
