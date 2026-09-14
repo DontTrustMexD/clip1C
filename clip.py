@@ -84,8 +84,11 @@ DEFAULTS = {
     # необязательный внешний навигатор по конфигурации: любой локальный сервис,
     # который умеет отвечать про метаданные, граф вызовов и карточки методов.
     # Скрепка только проверяет, жив ли он, и упоминает его в промпте для агента.
-    "navigatorName": "",           # как показывать в шапке; пусто — не показывать
-    "navigatorUrl": "",            # напр. http://127.0.0.1:8765; пусто — выключено
+    # ЗАЩИТА: читаем текст только из этих процессов. Пустой список означал бы
+    # чтение чего угодно — браузера, почты, мессенджера, — поэтому он не пустой.
+    "editorProcesses": ["1cv8.exe", "1cv8c.exe", "1cv8s.exe"],
+    "navigatorUrl": "",            # напр. http://127.0.0.1:8765; пусто — индикатора нет
+    "navigatorName": "",           # подпись в шапке; пусто — просто «навигатор»
     "pollMs": 700,
     "stripIndentOnInsert": True,
     "claudeCommand": "",           # напр. "claude" — когда CLI разрешат
@@ -172,8 +175,15 @@ user32.UnregisterHotKey.argtypes = [wt.HWND, ctypes.c_int]
 user32.SetForegroundWindow.argtypes = [wt.HWND]
 user32.ShowWindow.argtypes = [wt.HWND, ctypes.c_int]
 
+kernel32.OpenProcess.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
+kernel32.OpenProcess.restype = wt.HANDLE
+kernel32.CloseHandle.argtypes = [wt.HANDLE]
+kernel32.QueryFullProcessImageNameW.argtypes = [
+    wt.HANDLE, wt.DWORD, wt.LPWSTR, ctypes.POINTER(wt.DWORD)]
+
 WM_CHAR = 0x0102
 SW_RESTORE = 9
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 MOD_ALT, MOD_CONTROL, MOD_NOREPEAT = 0x0001, 0x0002, 0x4000
 WM_HOTKEY = 0x0312
 HK_CAPTURE, HK_INSERT, HK_TOGGLE = 1, 2, 3
@@ -212,6 +222,41 @@ def focused_hwnd():
         if attached:
             user32.AttachThreadInput(our_tid, target_tid, False)
     return (h or fg), window_text(fg)
+
+
+def process_of_window(hwnd):
+    """Имя exe-файла процесса, которому принадлежит окно."""
+    if not hwnd:
+        return ""
+    pid = wt.DWORD(0)
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    if not pid.value:
+        return ""
+    h = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
+    if not h:
+        return ""
+    try:
+        size = wt.DWORD(32768)
+        buf = ctypes.create_unicode_buffer(size.value)
+        if not kernel32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+            return ""
+        return os.path.basename(buf.value).lower()
+    finally:
+        kernel32.CloseHandle(h)
+
+
+def is_editor_window():
+    """Пускать ли чтение: активное окно должно принадлежать 1С.
+
+    Без этой проверки скрепка читала бы любой текст в фокусе — страницу
+    браузера, письмо, переписку — и писала бы его на диск и в языковой сервер.
+    """
+    fg = user32.GetForegroundWindow()
+    if not fg:
+        return False, ""
+    exe = process_of_window(fg)
+    allowed = [p.lower() for p in CFG.get("editorProcesses", [])]
+    return (exe in allowed), exe
 
 
 def post_text(hwnd, text):
@@ -350,6 +395,7 @@ class Reader:
         self._cache = None          # последний полный контекст
         self._cache_at = 0.0
         self._line_sig = None       # текст строки под кареткой на момент кэша
+        self.last_foreign = ""      # чей процесс был в фокусе, если это не 1С
         self._tp = None             # TextPattern редактора: нужен, чтобы прыгать к строке
         self._top_hwnd = None       # окно Конфигуратора, чтобы поднять его на передний план
         self.min_full_ms = 1200     # подстраивается под замеренное время чтения
@@ -388,6 +434,14 @@ class Reader:
 
     def read(self, force=False):
         t0 = time.perf_counter()
+
+        # Первым делом — чей это процесс. Всё остальное только после «да».
+        ok, exe = is_editor_window()
+        self.last_foreign = "" if ok else exe
+        if not ok:
+            self.last_read_ms = (time.perf_counter() - t0) * 1000
+            return None
+
         try:
             elem = self.iuia.GetFocusedElement()
         except Exception:
@@ -1046,13 +1100,20 @@ class Clip:
             self.l_method.config(
                 text=(f"{cur['kind']} {cur['name']}" if cur else "вне процедуры"), fg=DIM)
             ago = int(time.time() - self.last_ctx_at)
+            foreign = getattr(self.reader, "last_foreign", "")
+            tail = f"· {foreign}" if foreign else ""
             self.l_pos.config(
                 text=f"стр {L(old['cursorLine'])}:{old['cursorColumn']}  "
-                     f"· запомнено {ago} с назад")
+                     f"· запомнено {ago} с назад {tail}")
         else:
             self.dot.config(fg=BAD)
-            self.l_method.config(text="курсор не в модуле", fg=DIM)
-            self.l_pos.config(text="")
+            foreign = getattr(self.reader, "last_foreign", "")
+            if foreign:
+                self.l_method.config(text=f"чужое окно: {foreign}", fg=DIM)
+                self.l_pos.config(text="не читаю — только 1С")
+            else:
+                self.l_method.config(text="курсор не в модуле", fg=DIM)
+                self.l_pos.config(text="")
 
         if self.ls is not None:
             sig = (len(self.diags), self.method_bounds(),
@@ -1075,9 +1136,9 @@ class Clip:
 
         self.tick_nav += 1
         if self.tick_nav % 10 == 1:
-            name = CFG.get("navigatorName", "")
             url = CFG.get("navigatorUrl", "")
-            if name and url:
+            name = CFG.get("navigatorName") or "навигатор"
+            if url:
                 up = navigator_alive(url)
                 self.nav.config(text=f"{name} ✓" if up else f"{name} ✗",
                                 fg=OK if up else BAD)
@@ -1170,6 +1231,12 @@ class Clip:
             return
         if CFG.get("stripIndentOnInsert"):
             code = "\n".join(ln.lstrip("\t ") for ln in code.splitlines())
+
+        # вставляем только в 1С: промах фокусом иначе напечатает код в браузер
+        ok, exe = is_editor_window()
+        if not ok:
+            self.say(f"в фокусе {exe or 'не 1С'} — вставлять туда не буду", WARN)
+            return
 
         hwnd, _ = focused_hwnd()
         if not hwnd:
